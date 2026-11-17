@@ -149,3 +149,109 @@ tape('escaped quotes in option value parse', function (t) {
   t.same(schema.parse(fixture('escaped-quotes.proto')), require('./fixtures/escaped-quotes.json'))
   t.end()
 })
+
+// Some old engines (e.g. node 0.10) treat __proto__ as a magic property even on
+// objects without a prototype, so per-object __proto__ checks only run where it is a plain key
+var PROTO = '__proto__'
+var protoIsPlainKey = (function () {
+  var obj = Object.create(null)
+  obj[PROTO] = { x: 1 }
+  return obj.x === undefined
+})()
+
+tape('field option paths do not pollute Object.prototype', function (t) {
+  var proto = [
+    'syntax = "proto3";',
+    'message Exploit {',
+    '  string a = 1 [(__proto__).polluted = "HACKED"];',
+    '}'
+  ].join('\n')
+  try {
+    schema.parse(proto)
+  } catch (err) {
+    // rejecting the input is fine, polluting Object.prototype is not
+  }
+  t.equal(({}).polluted, undefined, 'Object.prototype is not polluted')
+  delete Object.prototype.polluted
+  t.end()
+})
+
+tape('options are parsed into objects without a prototype', function (t) {
+  var sch = schema.parse([
+    'option java_package = "foo";',
+    'enum E {',
+    '  option allow_alias = true;',
+    '  A = 1 [deprecated = true];',
+    '}',
+    'message M {',
+    '  option deprecated = true;',
+    '  optional string a = 1 [deprecated = true];',
+    '}',
+    'service S {',
+    '  option deprecated = true;',
+    '  rpc Get (M) returns (M) {',
+    '    option (my_opt) = { a: 1 };',
+    '  }',
+    '}'
+  ].join('\n'))
+  t.equal(Object.getPrototypeOf(sch.options), null, 'schema options')
+  t.equal(Object.getPrototypeOf(sch.enums[0].options), null, 'enum options')
+  t.equal(Object.getPrototypeOf(sch.enums[0].values.A.options), null, 'enum value options')
+  t.equal(Object.getPrototypeOf(sch.messages[0].options), null, 'message options')
+  t.equal(Object.getPrototypeOf(sch.messages[0].fields[0].options), null, 'field options')
+  t.equal(Object.getPrototypeOf(sch.services[0].options), null, 'service options')
+  t.equal(Object.getPrototypeOf(sch.services[0].methods[0].options), null, 'rpc options')
+  t.equal(Object.getPrototypeOf(sch.services[0].methods[0].options.my_opt), null, 'option map')
+  t.end()
+})
+
+tape('__proto__ options do not replace the prototype of option objects', function (t) {
+  var sch = schema.parse([
+    'enum E {',
+    '  option __proto__ = { polluted: "HACKED" };',
+    '  A = 1 [__proto__ = "HACKED"];',
+    '}',
+    'message M {',
+    '  optional string a = 1 [__proto__ = "HACKED"];',
+    '}'
+  ].join('\n'))
+  t.equal(({}).polluted, undefined, 'Object.prototype is not polluted')
+  if (protoIsPlainKey) {
+    var e = sch.enums[0]
+    t.equal(e.options.polluted, undefined, 'enum options keep a null prototype')
+    t.equal(Object.getPrototypeOf(e.options), null, 'enum options prototype is not replaced')
+    t.same(Object.keys(e.options), [PROTO], '__proto__ is kept as a plain enum option')
+    t.same(Object.keys(e.values.A.options), [PROTO], '__proto__ is kept as a plain enum value option')
+    t.same(Object.keys(sch.messages[0].fields[0].options), [PROTO], '__proto__ is kept as a plain field option')
+  }
+  delete Object.prototype.polluted
+  t.end()
+})
+
+tape('__proto__ keys in option maps do not replace the prototype of option objects', function (t) {
+  if (!protoIsPlainKey) {
+    t.equal(({}).polluted, undefined, 'Object.prototype is not polluted')
+    t.end()
+    return
+  }
+  var sch = schema.parse([
+    'option (file_opt) = { __proto__: { polluted: "HACKED" } };',
+    'message M {',
+    '  option __proto__ = { polluted: "HACKED" };',
+    '  optional string a = 1;',
+    '}',
+    'service S {',
+    '  option (svc_opt) = { __proto__ { polluted: "HACKED" } };',
+    '  rpc Get (M) returns (M);',
+    '}'
+  ].join('\n'))
+  t.equal(({}).polluted, undefined, 'Object.prototype is not polluted')
+  t.equal(sch.options.file_opt.polluted, undefined, 'option map keeps a null prototype')
+  t.equal(sch.options.file_opt[PROTO].polluted, 'HACKED', '__proto__ is kept as a plain option map key')
+  t.equal(sch.messages[0].options.polluted, undefined, 'message options keep a null prototype')
+  t.equal(sch.messages[0].options[PROTO].polluted, 'HACKED', '__proto__ is kept as a plain message option')
+  t.equal(sch.services[0].options.svc_opt.polluted, undefined, 'repeated option map keeps a null prototype')
+  t.ok(Array.isArray(sch.services[0].options.svc_opt[PROTO]), '__proto__ is kept as a plain repeated option map key')
+  delete Object.prototype.polluted
+  t.end()
+})
